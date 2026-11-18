@@ -11,9 +11,11 @@ gen_cfs_keys0() {
     local pub="$(printf "%s" "${pem}" | openssl pkey -outform DER -pubout | tail -c 32 | base64)"
     local seed="$(printf "%s" "${pem}" | openssl pkey -outform DER | tail -c 32 | base64)"
 
-    # Save secret key (concatenate seed and pub key); see libtest.sh in the ostree code base:
+    # Save secret key (concatenate seed and pub key); see libtest.sh in the ostree code base.
+    # On a single line: ostree reads one key per line, and base64 wraps at 76 characters.
     (printf "%s" "${seed}" | base64 -d && \
-     printf "%s" "${pub}"  | base64 -d) | base64 > "${seckey}"
+     printf "%s" "${pub}"  | base64 -d) | base64 -w0 > "${seckey}"
+    echo >> "${seckey}"
 
     # Save public key:
     printf "%s" "${pub}" > "${pubkey}"
@@ -39,6 +41,15 @@ gen_cfs_keys() {
 
     if [ ! -f "${seckey}" ]; then
         bbfatal "Could not find key file \"${seckey}\"."
+    fi
+
+    # Repair a secret key written with its base64 text wrapped at 76 characters,
+    # as this function did before: ostree would read the first line only.
+    local joined="$(tr -d '\n' < "${seckey}")"
+    if [ "$(grep -c . "${seckey}")" = "2" ] && [ "$(head -n1 "${seckey}" | tr -d '\n' | wc -c)" = "76" ] &&
+       [ "${#joined}" = "88" ]; then
+        bbnote "Joining the two lines of the secret key in \"${seckey}\"."
+        printf '%s\n' "${joined}" > "${seckey}"
     fi
 }
 
