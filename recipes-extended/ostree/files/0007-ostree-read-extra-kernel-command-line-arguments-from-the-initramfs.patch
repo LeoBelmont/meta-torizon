@@ -1,0 +1,218 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tanguy Raufflet <tanguy.raufflet@savoirfairelinux.com>
+Date: Wed, 18 Nov 2026 17:08:44 -0300
+Subject: [PATCH] ostree: read extra kernel command line arguments from the
+ initramfs
+
+With a signed Unified Kernel Image (UKI), the kernel command line is the
+one embedded in the UKI at build time, so it cannot carry the
+per-deployment "ostree=" argument that OSTree writes into the boot
+loader configuration. An initramfs module then finds that argument and
+writes it to /run/ostree/cmdline-extra.
+
+Read the kernel command line with the arguments of that file appended,
+wherever "ostree=" is looked up: in ostree-prepare-root and in the
+systemd generator. The units conditioned on "ostree" in the kernel
+command line now check for /run/ostree, which ostree-prepare-root
+creates, and ostree-prepare-root tolerates /run/ostree existing already,
+as the initramfs module creates it for cmdline-extra.
+
+Upstream-Status: Inappropriate [Torizon specific]
+Signed-off-by: Tanguy Raufflet <tanguy.raufflet@savoirfairelinux.com>
+[leonardo: ported to ostree 2026.1, from the x86 Secure Boot support of
+ meta-toradex-security]
+Signed-off-by: Leonardo Bornia <leonardo.bornia@toradex.com>
+---
+ src/boot/ostree-boot-complete.service        |  2 +-
+ src/boot/ostree-prepare-root.service         |  3 +-
+ src/boot/ostree-remount.service              |  2 +-
+ src/boot/ostree-state-overlay@.service       |  2 +-
+ src/libostree/ostree-impl-system-generator.c |  2 +-
+ src/switchroot/ostree-mount-util.h           | 57 ++++++++++++++++++++
+ src/switchroot/ostree-prepare-root-static.c  |  2 +-
+ src/switchroot/ostree-prepare-root.c         |  4 +-
+ 8 files changed, 66 insertions(+), 8 deletions(-)
+
+diff --git a/src/boot/ostree-boot-complete.service b/src/boot/ostree-boot-complete.service
+index e8b4f42..62dafa9 100644
+--- a/src/boot/ostree-boot-complete.service
++++ b/src/boot/ostree-boot-complete.service
+@@ -16,7 +16,7 @@
+ [Unit]
+ Description=OSTree Complete Boot
+ Documentation=man:ostree(1)
+-ConditionKernelCommandLine=ostree
++ConditionPathExists=/run/ostree
+ # For now, this is the only condition on which we start, but it's
+ # marked as a triggering condition in case in the future we want
+ # to do something else.
+diff --git a/src/boot/ostree-prepare-root.service b/src/boot/ostree-prepare-root.service
+index 4c2b6ba..253e5a4 100644
+--- a/src/boot/ostree-prepare-root.service
++++ b/src/boot/ostree-prepare-root.service
+@@ -17,7 +17,8 @@
+ Description=OSTree Prepare OS/
+ Documentation=man:ostree(1)
+ DefaultDependencies=no
+-ConditionKernelCommandLine=ostree
++ConditionKernelCommandLine=|ostree
++ConditionPathExists=|/run/ostree/cmdline-extra
+ ConditionPathExists=/etc/initrd-release
+ After=sysroot.mount
+ Requires=sysroot.mount
+diff --git a/src/boot/ostree-remount.service b/src/boot/ostree-remount.service
+index 7c0d01a..9f56248 100644
+--- a/src/boot/ostree-remount.service
++++ b/src/boot/ostree-remount.service
+@@ -17,7 +17,7 @@
+ Description=OSTree Remount OS/ Bind Mounts
+ Documentation=man:ostree(1)
+ DefaultDependencies=no
+-ConditionKernelCommandLine=ostree
++ConditionPathExists=/run/ostree
+ OnFailure=emergency.target
+ Conflicts=umount.target
+ # Run after core mounts
+diff --git a/src/boot/ostree-state-overlay@.service b/src/boot/ostree-state-overlay@.service
+index dc8aeac..af5e0c3 100644
+--- a/src/boot/ostree-state-overlay@.service
++++ b/src/boot/ostree-state-overlay@.service
+@@ -17,7 +17,7 @@
+ Description=OSTree State Overlay On /%I
+ Documentation=man:ostree(1)
+ DefaultDependencies=no
+-ConditionKernelCommandLine=ostree
++ConditionPathExists=/run/ostree
+ # run after /var is setup since that's where the upperdir is stored
+ # and after boot.mount so we can load the sysroot
+ After=var.mount boot.mount
+diff --git a/src/libostree/ostree-impl-system-generator.c b/src/libostree/ostree-impl-system-generator.c
+index a21ff6b..1949776 100644
+--- a/src/libostree/ostree-impl-system-generator.c
++++ b/src/libostree/ostree-impl-system-generator.c
+@@ -494,7 +494,7 @@ _ostree_impl_system_generator (const char *normal_dir, const char *early_dir, co
+     return TRUE;
+ #endif
+ 
+-  g_autofree char *cmdline = read_proc_cmdline ();
++  g_autofree char *cmdline = read_effective_proc_cmdline ();
+   if (!cmdline)
+     return glnx_throw (error, "Failed to read /proc/cmdline");
+ 
+diff --git a/src/switchroot/ostree-mount-util.h b/src/switchroot/ostree-mount-util.h
+index eb79efd..74c7be4 100644
+--- a/src/switchroot/ostree-mount-util.h
++++ b/src/switchroot/ostree-mount-util.h
+@@ -22,6 +22,7 @@
+ #define __OSTREE_MOUNT_UTIL_H_
+ 
+ #include <err.h>
++#include <errno.h>
+ #include <fcntl.h>
+ #include <stdbool.h>
+ #include <stdint.h>
+@@ -33,6 +34,7 @@
+ #include <unistd.h>
+ 
+ #define INITRAMFS_MOUNT_VAR "/run/ostree/initramfs-mount-var"
++#define INITRAMFS_CMDLINE_EXTRA "/run/ostree/cmdline-extra"
+ #define _OSTREE_SYSROOT_READONLY_STAMP "/run/ostree-sysroot-ro.stamp"
+ #define _OSTREE_COMPOSEFS_ROOT_STAMP "/run/ostree-composefs-root.stamp"
+ 
+@@ -77,6 +79,61 @@ out:
+   return cmdline;
+ }
+ 
++/* The kernel command line with the arguments the initramfs adds to it in
++ * INITRAMFS_CMDLINE_EXTRA, if any: the command line of a signed UKI is fixed
++ * at build time, so it cannot carry the per-deployment "ostree=" argument.
++ */
++static inline char *
++read_effective_proc_cmdline (void)
++{
++  char *cmdline = read_proc_cmdline ();
++  if (!cmdline)
++    return NULL;
++
++  FILE *f = fopen (INITRAMFS_CMDLINE_EXTRA, "r");
++  if (!f)
++    {
++      if (errno == ENOENT)
++        return cmdline;
++
++      free (cmdline);
++      return NULL;
++    }
++
++  char *cmdline_extra = NULL;
++  size_t len = 0;
++  if (getline (&cmdline_extra, &len, f) < 0)
++    {
++      bool at_eof = feof (f);
++      fclose (f);
++      free (cmdline_extra);
++      if (at_eof)
++        return cmdline;
++
++      free (cmdline);
++      return NULL;
++    }
++  fclose (f);
++
++  char *start = cmdline_extra + strspn (cmdline_extra, " \t\r\n");
++  char *end = start + strlen (start);
++  while (end > start && strchr (" \t\r\n", end[-1]))
++    *--end = '\0';
++
++  if (*start == '\0')
++    {
++      free (cmdline_extra);
++      return cmdline;
++    }
++
++  char *effective_cmdline = NULL;
++  if (asprintf (&effective_cmdline, "%s %s", cmdline, start) < 0)
++    effective_cmdline = NULL;
++  free (cmdline);
++  free (cmdline_extra);
++  return effective_cmdline;
++}
++
+ static inline void
+ cleanup_free (void *p)
+ {
+diff --git a/src/switchroot/ostree-prepare-root-static.c b/src/switchroot/ostree-prepare-root-static.c
+index 2ff202f..69a3c22 100644
+--- a/src/switchroot/ostree-prepare-root-static.c
++++ b/src/switchroot/ostree-prepare-root-static.c
+@@ -116,7 +116,7 @@ resolve_deploy_path (const char *root_mountpoint)
+   char destpath[PATH_MAX];
+   struct stat stbuf;
+   char *deploy_path;
+-  autofree char *kernel_cmdline = read_proc_cmdline ();
++  autofree char *kernel_cmdline = read_effective_proc_cmdline ();
+   if (!kernel_cmdline)
+     errx (EXIT_FAILURE, "Failed to read kernel cmdline");
+   autofree char *ostree_cmdline = find_proc_cmdline_key (kernel_cmdline, "ostree");
+diff --git a/src/switchroot/ostree-prepare-root.c b/src/switchroot/ostree-prepare-root.c
+index ef5b004..7f98b91 100644
+--- a/src/switchroot/ostree-prepare-root.c
++++ b/src/switchroot/ostree-prepare-root.c
+@@ -158,7 +158,7 @@ main (int argc, char *argv[])
+   g_autofree char *kernel_cmdline = NULL;
+   if (argc < 3)
+     {
+-      kernel_cmdline = read_proc_cmdline ();
++      kernel_cmdline = read_effective_proc_cmdline ();
+     }
+   else
+     {
+@@ -212,7 +212,7 @@ main (int argc, char *argv[])
+   g_assert (deploy_directory_name && *deploy_directory_name);
+ 
+   /* These are global state directories underneath /run */
+-  if (mkdirat (AT_FDCWD, OTCORE_RUN_OSTREE, 0755) < 0)
++  if (mkdirat (AT_FDCWD, OTCORE_RUN_OSTREE, 0755) < 0 && errno != EEXIST)
+     err (EXIT_FAILURE, "Failed to create %s", OTCORE_RUN_OSTREE);
+   if (mkdirat (AT_FDCWD, OTCORE_RUN_OSTREE_PRIVATE, 0) < 0)
+     err (EXIT_FAILURE, "Failed to create %s", OTCORE_RUN_OSTREE_PRIVATE);

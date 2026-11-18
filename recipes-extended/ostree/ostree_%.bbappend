@@ -16,6 +16,12 @@ SRC_URI:append = " \
     file://ostree-repo-config.service \
 "
 
+# Booting a signed UKI, whose command line cannot carry "ostree=": take it
+# from /run/ostree/cmdline-extra, written by initramfs-module-ostreeuki.
+SRC_URI:append:ostree-uki = " \
+    file://0007-ostree-read-extra-kernel-command-line-arguments-from-the-initramfs.patch \
+"
+
 # Disable PTEST for ostree as it requires options that are not enabled when
 # building with meta-updater
 PTEST_ENABLED = "0"
