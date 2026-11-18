@@ -14,6 +14,8 @@ SRC_URI:append:cfs-support = "\
     file://80-composefs.conf \
 "
 
+SRC_URI:append:ostree-uki = " file://ostreeuki"
+
 PACKAGES:append = " \
     initramfs-module-plymouth \
     initramfs-module-kmod \
@@ -23,10 +25,16 @@ PACKAGES:append:cfs-support = "\
     initramfs-module-composefs \
 "
 
+PACKAGES:append:ostree-uki = " initramfs-module-ostreeuki"
+
 SUMMARY:initramfs-module-plymouth = "initramfs support for plymouth"
 RDEPENDS:initramfs-module-plymouth = "${PN}-base plymouth ${@bb.utils.contains('DISTRO_FEATURES', 'systemd', 'systemd-udev-rules', '', d)}"
 FILES:initramfs-module-plymouth = "/init.d/02-plymouth"
 
+
+SUMMARY:initramfs-module-ostreeuki = "initramfs support for finding the OSTree deployment of a signed UKI"
+RDEPENDS:initramfs-module-ostreeuki = "${PN}-base"
+FILES:initramfs-module-ostreeuki = "/init.d/93-ostreeuki"
 
 SUMMARY:initramfs-module-composefs = "initramfs support for booting composefs images"
 RDEPENDS:initramfs-module-composefs = "${PN}-base"
@@ -59,6 +67,11 @@ RDEPENDS:initramfs-module-kmod = "${@get_initramfs_kmods(d)} ${PN}-base"
 do_install:append() {
     install -m 0755 ${UNPACKDIR}/plymouth ${D}/init.d/02-plymouth
     install -m 0755 ${UNPACKDIR}/kmod ${D}/init.d/01-kmod
+}
+
+# Before composefs (94) and ostree (95), which need the OSTree deployment
+do_install:append:ostree-uki() {
+    install -m 0755 ${UNPACKDIR}/ostreeuki ${D}/init.d/93-ostreeuki
 }
 
 require recipes-extended/ostree/ostree-prepare-root.inc

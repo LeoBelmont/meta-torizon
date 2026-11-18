@@ -1,0 +1,79 @@
+#!/bin/sh
+# Copyright (C) 2026 Toradex AG.
+# Licensed on MIT
+#
+# Find the OSTree deployment when booting a signed Unified Kernel Image (UKI).
+#
+# The kernel command line of a signed UKI is fixed at build time, so it cannot
+# carry the per-deployment "ostree=" argument that OSTree writes into the boot
+# loader configuration. The boot loader publishes the boot arguments of the
+# entry it booted in an EFI variable instead: take "ostree=" from there and
+# write it to /run/ostree/cmdline-extra, where ostree-prepare-root and the
+# systemd generator of OSTree look for it.
+#
+# The boot arguments are not signed, so they only choose which deployment
+# boots: composefs in "signed" mode (cfs-signed) then verifies it.
+
+OSTREEUKI_CMDLINE_EXTRA="/run/ostree/cmdline-extra"
+OSTREEUKI_EFIVARS="/sys/firmware/efi/efivars"
+
+# Set by the Torizon boot mode of NVIDIA's L4TLauncher (Jetson)
+OSTREEUKI_TORIZON_BOOTARGS="${OSTREEUKI_EFIVARS}/TorizonBootArgs-42dcf640-982c-443e-a0af-f6eb12f881f5"
+
+ostreeuki_enabled() {
+	# Nothing to do when the kernel command line has "ostree=" already
+	[ -z "${bootparam_ostree}" ]
+}
+
+# Mount efivarfs if nothing did yet; sets ostreeuki_efivars_mounted when it did
+ostreeuki_mount_efivars() {
+	ostreeuki_efivars_mounted=""
+	[ -d "${OSTREEUKI_EFIVARS}" ] || return 1
+	if ! grep -q " ${OSTREEUKI_EFIVARS} efivarfs " /proc/mounts; then
+		mount -t efivarfs efivarfs "${OSTREEUKI_EFIVARS}" || return 1
+		ostreeuki_efivars_mounted="1"
+	fi
+}
+
+# Print an EFI variable holding a UCS-2 string, skipping its 4 attribute bytes
+ostreeuki_read_efi_string() {
+	dd if="$1" bs=1 skip=4 2>/dev/null | tr -d '\000\r\n'
+}
+
+ostreeuki_run() {
+	if ! ostreeuki_mount_efivars; then
+		fatal "ERROR: efivarfs is not available, cannot find the OSTree deployment"
+	fi
+
+	if [ ! -f "${OSTREEUKI_TORIZON_BOOTARGS}" ]; then
+		fatal "ERROR: the boot loader did not pass the boot arguments, cannot find the OSTree deployment"
+	fi
+
+	ostree_arg=""
+	for arg in $(ostreeuki_read_efi_string "${OSTREEUKI_TORIZON_BOOTARGS}"); do
+		case "${arg}" in
+		ostree=*)
+			ostree_arg="${arg}"
+			;;
+		esac
+	done
+
+	# Leave efivarfs as it was found: the system mounts it itself later
+	if [ -n "${ostreeuki_efivars_mounted}" ]; then
+		umount "${OSTREEUKI_EFIVARS}" || true
+	fi
+
+	# Accept only a deployment boot link as OSTree writes it
+	if ! printf '%s\n' "${ostree_arg#ostree=}" | \
+		grep -Eq '^/ostree/boot\.[01]/[A-Za-z0-9_.-]+/[0-9a-f]{64}/[0-9]+$'; then
+		fatal "ERROR: no valid ostree= in the boot arguments: '${ostree_arg}'"
+	fi
+
+	mkdir -p "$(dirname "${OSTREEUKI_CMDLINE_EXTRA}")"
+	echo "${ostree_arg}" > "${OSTREEUKI_CMDLINE_EXTRA}"
+
+	# The modules run in this shell: let the following ones (e.g. composefs)
+	# see it as if it came from the kernel command line.
+	bootparam_ostree="${ostree_arg#ostree=}"
+	info "OSTree deployment from the boot loader: ${bootparam_ostree}"
+}

@@ -9,6 +9,8 @@ PACKAGE_INSTALL:append:cfs-support = "\
     initramfs-module-composefs \
 "
 
+PACKAGE_INSTALL:append:ostree-uki = " initramfs-module-ostreeuki"
+
 SYSTEMD_DEFAULT_TARGET = "initrd.target"
 
 IMAGE_NAME_SUFFIX = ""
