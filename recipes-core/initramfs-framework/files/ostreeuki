@@ -19,6 +19,8 @@ OSTREEUKI_EFIVARS="/sys/firmware/efi/efivars"
 
 # Set by the Torizon boot mode of NVIDIA's L4TLauncher (Jetson)
 OSTREEUKI_TORIZON_BOOTARGS="${OSTREEUKI_EFIVARS}/TorizonBootArgs-42dcf640-982c-443e-a0af-f6eb12f881f5"
+# Its boot flags: bit 0 is upgrade_available, an update that is being tried
+OSTREEUKI_TORIZON_BOOTFLAGS="${OSTREEUKI_EFIVARS}/TorizonBootFlags-781e084c-a330-417c-b678-38e696380cb9"
 
 ostreeuki_enabled() {
 	# Nothing to do when the kernel command line has "ostree=" already
@@ -35,12 +37,60 @@ ostreeuki_mount_efivars() {
 	fi
 }
 
+# Whether the boot loader is trying an update (upgrade_available)
+ostreeuki_update_pending() {
+	ostreeuki_pending_mounted=""
+	if ! grep -q " ${OSTREEUKI_EFIVARS} efivarfs " /proc/mounts; then
+		mount -t efivarfs efivarfs "${OSTREEUKI_EFIVARS}" 2>/dev/null || return 1
+		ostreeuki_pending_mounted="1"
+	fi
+	# The first byte after the 4 attribute bytes, as a digit
+	ostreeuki_flags="$(dd if="${OSTREEUKI_TORIZON_BOOTFLAGS}" bs=1 skip=4 count=1 2>/dev/null | \
+		tr '\000\001\002\003' '0123')"
+	if [ -n "${ostreeuki_pending_mounted}" ]; then
+		umount "${OSTREEUKI_EFIVARS}" 2>/dev/null || true
+	fi
+	case "${ostreeuki_flags}" in
+	1|3) return 0 ;;
+	esac
+	return 1
+}
+
+# What fatal() of the init script does, except while an update is being
+# tried: the boot loader counts the attempts to boot an update with a counter
+# that survives a reset and nothing else, and falls back to the previous
+# deployment when it runs out. A boot that stops here is not followed by a
+# reset, so the counter would never run out. Reset instead.
+ostreeuki_fatal() {
+	echo "$1" > "${CONSOLE:-/dev/console}"
+	echo > "${CONSOLE:-/dev/console}"
+
+	if [ -n "${bootparam_init_fatal_reboot}" ]; then
+		reboot -f
+	elif [ -n "${bootparam_init_fatal_sh}" ]; then
+		sh
+	elif ostreeuki_update_pending; then
+		echo "An update is being tried: resetting, for the boot loader to count this attempt" \
+			> "${CONSOLE:-/dev/console}"
+		sleep 3
+		reboot -f || echo b > /proc/sysrq-trigger
+	fi
+	while true; do
+		sleep 3600
+	done
+}
+
 # Print an EFI variable holding a UCS-2 string, skipping its 4 attribute bytes
 ostreeuki_read_efi_string() {
 	dd if="$1" bs=1 skip=4 2>/dev/null | tr -d '\000\r\n'
 }
 
 ostreeuki_run() {
+	# For this module and the ones after it (composefs, ostree)
+	fatal() {
+		ostreeuki_fatal "$@"
+	}
+
 	if ! ostreeuki_mount_efivars; then
 		fatal "ERROR: efivarfs is not available, cannot find the OSTree deployment"
 	fi
